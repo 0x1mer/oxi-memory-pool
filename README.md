@@ -16,12 +16,13 @@ Designed for performance-critical and low-level code where dynamic allocations m
 
 - Header-only
 - Fixed-capacity pool (no heap allocations after construction)
-- Strong RAII ownership model
+- Strong RAII ownership model (`MemoryPoolObject<T>`)
 - Free-list reuse (O(1) allocation / deallocation)
-- Correct alignment handling
-- Exception-safe object construction
+- Correct alignment handling (supports over-aligned types)
+- Strong exception safety for object construction
 - Optional compile-time logging
-- Optional compile-time thread safety
+- Optional compile-time thread safety (mutex-based)
+- Optional user-defined error callback
 - C++20 constraints (`std::destructible`)
 
 ---
@@ -73,17 +74,24 @@ auto obj = pool.Make(args...);
 ```
 
 - Constructs `T` in-place inside the pool
-- Returns a `MemoryPoolObject<T>`
-- Strong exception guarantee
+- Returns a `MemoryPoolObject<T>` (unique ownership)
+- Strong exception guarantee:
+  - If constructor throws, the slot is returned to the pool
+  - No leaks, pool remains usable
 
 #### Statistics
 
 ```cpp
-size_t Capacity() const;
-size_t Used() const;
-size_t Available() const;
-size_t MaxAllocated() const;
+size_t Capacity() const noexcept;
+size_t Used() const noexcept;
+size_t Available() const noexcept;
+size_t MaxAllocated() const noexcept;
 ```
+
+- `Capacity()` — total number of slots
+- `Used()` — currently live objects
+- `Available()` — free slots
+- `MaxAllocated()` — highest linear allocation watermark
 
 ---
 
@@ -96,6 +104,7 @@ RAII wrapper representing **unique ownership** of an object inside the pool.
 - Move-only
 - Automatically destroys the object on scope exit
 - Returns memory back to the pool
+- Safe to reset explicitly
 
 #### Interface
 
@@ -111,20 +120,23 @@ void Reset();
 
 ## Object Lifetime Rules
 
-- `MemoryPool` must outlive all `MemoryPoolObject<T>` instances
-- Destroying the pool while objects are still alive triggers an `assert` in debug builds
+- `MemoryPool` **must outlive** all `MemoryPoolObject<T>` instances
+- Destroying the pool while objects are still alive:
+  - Triggers an `assert` in debug builds
+  - Is undefined behaviour in release builds
 - Each pool slot owns exactly one object at a time
-- Objects are destroyed before their memory is returned to the pool
+- Objects are destroyed *before* their memory is returned to the pool
 
 ---
 
 ## Exception Safety
 
-- Strong exception safety guarantee
+- Strong exception safety guarantee for `Make()`
 - If a constructor throws:
   - Slot is returned to the free-list
+  - `Used()` counter is rolled back
   - No memory leaks
-  - Pool remains usable
+- Destructors of `T` **must not throw**
 
 ---
 
@@ -137,29 +149,61 @@ void Reset();
 ### Thread-safe mode
 
 ```cpp
-#define ThreadSafe
+#define OxiMemPool_ThreadSafe
 #include "MemoryPool.h"
 ```
 
-- All pool operations are protected by a mutex
-- Safe for concurrent `Make()` / destruction
-- Slight performance overhead
+- All public pool operations are protected by a single `std::mutex`
+- Safe for concurrent `Make()` and object destruction
+- Object construction and destruction occur **outside** the mutex
+- Slight performance overhead compared to single-threaded mode
+- Not lock-free
+
+---
+
+## Error Handling
+
+### Default behaviour
+
+- Errors are reported via `std::runtime_error` exceptions
+
+### Error callback support
+
+```cpp
+#define OxiMemPool_ErrCallback
+#include "MemoryPool.h"
+```
+
+Callback signature:
+
+```cpp
+void(const char* message, size_t errorCode)
+```
+
+Usage:
+
+```cpp
+void MyErrorHandler(const char* msg, size_t code) {
+    // custom logging, abort, etc.
+}
+
+MemoryPool<Foo> pool(64, &MyErrorHandler);
+```
+
+- If a callback is provided, it is invoked instead of throwing
+- Typical error cases:
+  - Pool exhausted
+  - Pool constructed with zero capacity
 
 ---
 
 ## Compile-Time Configuration
 
-### Logging
-
-```cpp
-#define InfoLog
-#include "MemoryPool.h"
-```
-
-| Macro      | Values | Description                                  |
-|------------|--------|----------------------------------------------|
-| InfoLog    | 0 / 1  | Enables verbose logging of pool operations   |
-| ThreadSafe | 0 / 1  | Enables mutex-based thread safety            |
+| Macro                    | Values | Description                                      |
+|--------------------------|--------|--------------------------------------------------|
+| OxiMemPool_InfoLog       | 0 / 1  | Enables verbose logging of pool operations       |
+| OxiMemPool_ThreadSafe    | 0 / 1  | Enables mutex-based thread safety                |
+| OxiMemPool_ErrCallback   | 0 / 1  | Enables user-defined error callback support      |
 
 ---
 
@@ -170,6 +214,7 @@ void Reset();
 - Objects are not zero-initialized
 - No bounds checking in release builds
 - Not lock-free (even in thread-safe mode)
+- Pool destruction must be externally synchronized in multithreaded code
 
 ---
 

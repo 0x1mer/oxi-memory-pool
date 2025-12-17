@@ -7,8 +7,12 @@
 #include <chrono>
 #include <algorithm>
 #include <random>
+#include <mutex>
+#include <string>
 
-#define ThreadSafe
+// Включаем ThreadSafe и ErrCallback для тестирования соответствующих веток
+#define OxiMemPool_ThreadSafe
+#define OxiMemPool_ErrCallback
 #include "MemoryPool.h"
 
 // --------------------- Вспомогательные типы для тестов ---------------------
@@ -43,12 +47,31 @@ struct ThrowOnValue {
 };
 std::atomic<int> ThrowOnValue::constructions{0};
 
+struct alignas(64) BigAligned {
+    char data[64];
+    BigAligned() { data[0] = 0; }
+};
+
 // --------------------- Утилиты assert/print ---------------------
 #define TEST_ASSERT(expr) do { if (!(expr)) { \
     std::cerr << "ASSERT FAILED: " #expr << " at " << __FILE__ << ":" << __LINE__ << "\n"; \
     std::terminate(); } } while(0)
 
 void info(const char *s) { std::cout << "[TEST] " << s << "\n"; }
+
+// --------------------- Error callback capture ---------------------
+
+static std::atomic<int> g_err_count{0};
+static std::atomic<size_t> g_last_err_code{0};
+static std::string g_last_err_msg;
+static std::mutex g_err_mutex;
+
+void TestErrorCallback(const char* msg, size_t code) {
+    ++g_err_count;
+    g_last_err_code.store(code);
+    std::lock_guard<std::mutex> lk(g_err_mutex);
+    g_last_err_msg = msg ? msg : "";
+}
 
 // --------------------- Тесты ---------------------
 
@@ -108,21 +131,30 @@ void test_reuse_free_slot() {
     TEST_ASSERT(pool.Used() == 0);
 }
 
-// Проверка выравнивания адресов
+// Проверка выравнивания адресов на Trackable и BigAligned
 void test_alignment() {
     info("test_alignment");
-    MemoryPool<Trackable> pool(8);
-    std::vector<void*> addrs;
-    for (int i=0;i<5;i++){
-        auto o = pool.Make(i);
-        addrs.push_back(o.Get());
+    {
+        MemoryPool<Trackable> pool(8);
+        std::vector<void*> addrs;
+        for (int i=0;i<5;i++){
+            auto o = pool.Make(i);
+            addrs.push_back(o.Get());
+        }
+        for (void* a : addrs) {
+            uintptr_t up = reinterpret_cast<uintptr_t>(a);
+            TEST_ASSERT((up % alignof(Trackable)) == 0);
+        }
     }
-    for (void* a : addrs) {
-        uintptr_t up = reinterpret_cast<uintptr_t>(a);
-        TEST_ASSERT((up % alignof(Trackable)) == 0);
+    {
+        MemoryPool<BigAligned> pool(4);
+        std::vector<void*> addrs;
+        for (int i=0;i<3;i++) addrs.push_back(pool.Make().Get());
+        for (void* a : addrs) {
+            uintptr_t up = reinterpret_cast<uintptr_t>(a);
+            TEST_ASSERT((up % alignof(BigAligned)) == 0);
+        }
     }
-    // освобождаем всё
-    // memory pool object RAII освободит при выходе scope
 }
 
 // Проверка move семантики MemoryPoolObject
@@ -168,7 +200,7 @@ void test_destructor_called() {
     TEST_ASSERT(Trackable::alive.load() == 0);
 }
 
-// Проверка поведения при исключении конструктора — важный тест на exception-safety
+// Проверка поведения при исключении конструктора — important
 void test_exception_safety() {
     info("test_exception_safety");
     MemoryPool<ThrowOnValue> pool(3);
@@ -184,7 +216,6 @@ void test_exception_safety() {
 
     // попытка создать объект, конструктор бросает
     size_t used_before = pool.Used();
-    size_t max_before = pool.MaxAllocated();
     try {
         auto bad = pool.Make(ThrowOnValue::magic); // должен бросить
         (void)bad;
@@ -193,18 +224,77 @@ void test_exception_safety() {
         // ожидаем, что количество живых объектов не изменилось
         TEST_ASSERT(pool.Used() == used_before);
         TEST_ASSERT(ThrowOnValue::constructions.load() == 0);
-        // Поведение m_max_allocated: реализация увеличивает max_allocated при линейном выделении
-        // и при падении конструктора возвращает слот в free-list (но max_allocated не уменьшается).
-        // Проверим, что пул не "утёк" живыми объектами и слот доступен для повторного использования.
+
+        // слот должен быть доступен для повторного использования
         auto ok = pool.Make(999);
         TEST_ASSERT(ok);
         ok.Reset();
     }
 }
 
+// Проверка MaxAllocated "монотонности" и повторного использования
+void test_max_allocated_behavior() {
+    info("test_max_allocated_behavior");
+    MemoryPool<Trackable> pool(3);
+    TEST_ASSERT(pool.MaxAllocated() == 0);
+
+    auto a = pool.Make(1); // max_allocated -> 1
+    auto b = pool.Make(2); // -> 2
+    TEST_ASSERT(pool.MaxAllocated() >= 2);
+
+    a.Reset(); // free first
+    TEST_ASSERT(pool.Used() == 1);
+
+    auto c = pool.Make(3); // should reuse a's slot, MaxAllocated should not decrease
+    TEST_ASSERT(pool.MaxAllocated() >= 2);
+    TEST_ASSERT(pool.Used() == 2);
+
+    // allocate until capacity
+    auto d = pool.Make(4);
+    TEST_ASSERT(pool.Used() <= pool.Capacity());
+    TEST_ASSERT(pool.MaxAllocated() <= pool.Capacity());
+    d.Reset(); c.Reset(); b.Reset();
+    TEST_ASSERT(pool.Used() == 0);
+}
+
+// Тестируем error callback: переполнение пула
+void test_error_callback_exhaustion() {
+    info("test_error_callback_exhaustion");
+    g_err_count.store(0);
+    {
+        MemoryPool<Trackable> pool(2, &TestErrorCallback);
+        auto a = pool.Make(1);
+        auto b = pool.Make(2);
+        TEST_ASSERT(a && b);
+        auto c = pool.Make(3); // переполнение -> должен вызвать callback и вернуть empty wrapper
+        TEST_ASSERT(!c); // объект не создан
+        TEST_ASSERT(g_err_count.load() >= 1);
+        TEST_ASSERT(g_last_err_code.load() != 0);
+        TEST_ASSERT(pool.Used() == 2);
+        a.Reset(); b.Reset();
+    }
+    // callback count at least 1 during test
+    TEST_ASSERT(g_err_count.load() >= 1);
+}
+
+// Тестируем error callback в конструкторе пула с count==0 (конструктор вызывает ReportError)
+void test_error_callback_constructor_zero() {
+    info("test_error_callback_constructor_zero");
+    g_err_count.store(0);
+    // Конструктор с count==0 вызывает ReportError — наш callback должен быть вызван
+    MemoryPool<Trackable> *poolPtr = nullptr;
+    try {
+        poolPtr = new MemoryPool<Trackable>(0, &TestErrorCallback);
+    } catch (...) {
+        // если реализация выбрасывает вместо вызова callback - это допустимо, поймаем
+    }
+    TEST_ASSERT(g_err_count.load() >= 1 || poolPtr == nullptr);
+    delete poolPtr; // если nullptr - delete безопасен
+}
+
 // Многопоточный стресс-тест — выполняется только если пул собран с ThreadSafe
 void test_multithreaded_stress() {
-#ifdef ThreadSafe
+#ifdef OxiMemPool_ThreadSafe
     info("test_multithreaded_stress");
     constexpr int THREADS = 8;
     constexpr int OPS = 3000;
@@ -212,18 +302,22 @@ void test_multithreaded_stress() {
 
     std::atomic<int> counter{0};
     auto worker = [&](int tid){
-        std::mt19937 rng(tid + 123);
+        std::mt19937 rng(tid + 1234);
         std::uniform_int_distribution<int> dist(1, 10000);
+        std::uniform_int_distribution<int> sleepDist(0, 3);
         for (int i=0;i<OPS;i++){
             int v = dist(rng);
             auto o = pool.Make(v);
+            // allocation might fail only if pool exhausted (shouldn't for our capacity),
             TEST_ASSERT(o);
             ++counter;
-            // случайно переместим o или сбросим
+            // иногда переместим o или сбросим
             if ((v & 1) == 0) {
                 auto tmp = std::move(o);
+                if ((v & 3) == 0) std::this_thread::yield();
                 tmp.Reset();
             } else {
+                if ((v & 7) == 0) std::this_thread::sleep_for(std::chrono::microseconds(sleepDist(rng)));
                 o.Reset();
             }
         }
@@ -251,6 +345,9 @@ int main() {
     test_move_semantics();
     test_destructor_called();
     test_exception_safety();
+    test_max_allocated_behavior();
+    test_error_callback_exhaustion();
+    test_error_callback_constructor_zero();
     test_multithreaded_stress();
 
     std::cout << "=== All tests PASSED ===\n";
