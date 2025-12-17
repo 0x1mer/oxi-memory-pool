@@ -1,7 +1,7 @@
 # C++ MemoryPool
 
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![C++](https://img.shields.io/badge/C%2B%2B-17%2B-blue)](https://en.cppreference.com/w/cpp/17)
+[![C++](https://img.shields.io/badge/C%2B%2B-17%2B-blue)](https://en.cppreference.com/w/cpp/20)
 ![Header Only](https://img.shields.io/badge/header--only-yes-orange)
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey)
 ![Status](https://img.shields.io/badge/status-active-success)

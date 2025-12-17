@@ -8,6 +8,7 @@
 
 // Forward declaration
 template <typename T>
+requires std::destructible<T>
 class MemoryPool;
 
 /**
@@ -20,6 +21,7 @@ class MemoryPool;
  *
  */
 template <typename T>
+requires std::destructible<T>
 class MemoryPoolObject
 {
 private:
@@ -72,6 +74,7 @@ public:
         }
     }
 
+    [[nodiscard("Release() transfers ownership; returned pointer must be manually destroyed")]]
     T *Release() noexcept
     {
         T *tmp = m_object;
@@ -87,6 +90,7 @@ public:
 };
 
 template <typename T>
+requires std::destructible<T>
 class MemoryPool
 {
 private:
@@ -96,7 +100,7 @@ private:
     };
 
     size_t m_count;
-    size_t m_used = 0;
+    size_t m_max_allocated = 0;
     std::byte *m_pool;
 
     FreeNode *m_free_head = nullptr;
@@ -141,9 +145,9 @@ private:
             return reinterpret_cast<T *>(node);
         }
 
-        assert(m_used < m_count);
+        assert(m_max_allocated < m_count);
 
-        size_t index = m_used++;
+        size_t index = m_max_allocated++;
         std::byte *addr = m_pool + SlotSize * index;
 
 #ifdef InfoLog
@@ -184,13 +188,13 @@ public:
     ~MemoryPool() noexcept
     {
 #ifdef InfoLog
-        std::cout << "[Pool][DESTROY] used=" << m_used << "\n";
+        std::cout << "[Pool][DESTROY] max allocated=" << m_max_allocated << "\n";
 #endif
         ::operator delete(m_pool, std::align_val_t{SlotAlign});
     }
 
     template <typename... Args>
-    MemoryPoolObject<T> Make(Args &&...args)
+    [[nodiscard]] MemoryPoolObject<T> Make(Args &&...args)
     {
 #ifdef InfoLog
         std::cout << "[Pool][MAKE] create RAII object\n";
@@ -198,5 +202,6 @@ public:
         return MemoryPoolObject<T>(*this, Create(std::forward<Args>(args)...));
     }
 
-    size_t Size() const noexcept { return m_count; }
+    size_t Capacity() const noexcept { return m_count; }
+    size_t MaxAllocated() const noexcept { return m_max_allocated; }
 };
