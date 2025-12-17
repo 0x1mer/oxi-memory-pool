@@ -1,14 +1,28 @@
 #pragma once
 
+#include <cstddef>     // std::byte
+#include <new>         // operator new, std::align_val_t
+#include <cassert>     // assert
+#include <utility>     //std::forward
+#include <type_traits> //std::destructible
+
+// For now this pool is not thread-safe. But it will be later.
+
 // Compilation flag for logging
 // Use #define InfoLog to logging on
 #ifdef InfoLog
 #include <iostream>
 #endif
 
+// Compilation flag for thread safe
+// Use #define ThreadSafe to thread-safe on
+#ifdef ThreadSafe
+#include <mutex>
+#endif
+
 // Forward declaration
 template <typename T>
-requires std::destructible<T>
+    requires std::destructible<T>
 class MemoryPool;
 
 /**
@@ -21,7 +35,7 @@ class MemoryPool;
  *
  */
 template <typename T>
-requires std::destructible<T>
+    requires std::destructible<T>
 class MemoryPoolObject
 {
 private:
@@ -34,6 +48,16 @@ private:
 
     MemoryPoolObject(MemoryPool<T> &pool, T *object) noexcept
         : m_pool(&pool), m_object(object) {}
+
+    void Destroy()
+    {
+        if (m_pool && m_object)
+        {
+            m_pool->Destroy(m_object);
+            m_pool = nullptr;
+            m_object = nullptr;
+        }
+    }
 
 public:
     MemoryPoolObject(const MemoryPoolObject &) = delete;
@@ -64,24 +88,7 @@ public:
         Destroy();
     }
 
-    void Destroy()
-    {
-        if (m_pool && m_object)
-        {
-            m_pool->Destroy(m_object);
-            m_pool = nullptr;
-            m_object = nullptr;
-        }
-    }
-
-    [[nodiscard("Release() transfers ownership; returned pointer must be manually destroyed")]]
-    T *Release() noexcept
-    {
-        T *tmp = m_object;
-        m_object = nullptr;
-        m_pool = nullptr;
-        return tmp;
-    }
+    void Reset() noexcept { Destroy(); }
 
     T *Get() const noexcept { return m_object; }
     T &operator*() const noexcept { return *m_object; }
@@ -90,7 +97,7 @@ public:
 };
 
 template <typename T>
-requires std::destructible<T>
+    requires std::destructible<T>
 class MemoryPool
 {
 private:
@@ -100,73 +107,101 @@ private:
     };
 
     size_t m_count;
-    size_t m_max_allocated = 0;
     std::byte *m_pool;
 
-    FreeNode *m_free_head = nullptr;
+#ifdef ThreadSafe
+    mutable std::mutex m;
+#endif
 
-    static constexpr size_t SlotSize =
+    // All of this only under mutex!!! (in thread safe version)
+    FreeNode *m_free_head = nullptr;
+    size_t m_used = 0;
+    size_t m_max_allocated = 0;
+
+    static constexpr size_t RawSlotSize =
         sizeof(T) > sizeof(FreeNode) ? sizeof(T) : sizeof(FreeNode);
     static constexpr size_t SlotAlign =
         alignof(T) > alignof(FreeNode) ? alignof(T) : alignof(FreeNode);
+    static constexpr size_t SlotSize =
+        (RawSlotSize + SlotAlign - 1) / SlotAlign * SlotAlign;
 
 private:
     friend class MemoryPoolObject<T>;
     void Destroy(T *obj)
     {
-#ifdef InfoLog
-        std::cout << "[Pool][DESTROY] destruct object at "
-                  << static_cast<void *>(obj) << "\n";
-#endif
         obj->~T();
-
         auto *node = reinterpret_cast<FreeNode *>(obj);
+
+#ifdef ThreadSafe
+        std::lock_guard<std::mutex> guard(m);
+        FreeNode *old_head = m_free_head;
+        node->next = old_head;
+        m_free_head = node;
+        m_used--;
+#else
         node->next = m_free_head;
         m_free_head = node;
-
-#ifdef InfoLog
-        std::cout << "[Pool][FREE-LIST] slot returned at "
-                  << static_cast<void *>(node) << "\n";
+        --m_used;
 #endif
     }
 
 private:
     T *Allocate()
     {
+#ifdef ThreadSafe
+        // 1. Try free-list
+        std::lock_guard<std::mutex> guard(m);
         if (m_free_head)
         {
             FreeNode *node = m_free_head;
             m_free_head = node->next;
+            return reinterpret_cast<T *>(node);
+        }
 
-#ifdef InfoLog
-            std::cout << "[Pool][ALLOC][FREE-LIST] reuse slot at "
-                      << static_cast<void *>(node) << "\n";
-#endif
+        // 2. Linear allocation
+        assert(m_max_allocated < m_count);
+
+        return reinterpret_cast<T *>(m_pool + SlotSize * m_max_allocated++);
+#else
+        if (m_free_head)
+        {
+            FreeNode *node = m_free_head;
+            m_free_head = node->next;
             return reinterpret_cast<T *>(node);
         }
 
         assert(m_max_allocated < m_count);
-
-        size_t index = m_max_allocated++;
-        std::byte *addr = m_pool + SlotSize * index;
-
-#ifdef InfoLog
-        std::cout << "[Pool][ALLOC][LINEAR] index=" << index
-                  << ", addr=" << static_cast<void *>(addr) << "\n";
+        return reinterpret_cast<T *>(m_pool + SlotSize * m_max_allocated++);
 #endif
-        return reinterpret_cast<T *>(addr);
     }
 
     template <typename... Args>
     T *Create(Args &&...args)
     {
         T *ptr = Allocate();
-
+        try
+        {
 #ifdef InfoLog
-        std::cout << "[Pool][CREATE] construct object at "
-                  << static_cast<void *>(ptr) << "\n";
+            std::cout << "[Pool][CREATE] construct object at "
+                      << static_cast<void *>(ptr) << "\n";
 #endif
-        new (ptr) T(std::forward<Args>(args)...);
+            new (ptr) T(std::forward<Args>(args)...);
+        }
+        catch (...)
+        {
+            auto *node = reinterpret_cast<FreeNode *>(ptr);
+#ifdef ThreadSafe
+            {
+                std::lock_guard<std::mutex> guard(m);
+                node->next = m_free_head;
+                m_free_head = node;
+            }
+#else
+            node->next = m_free_head;
+            m_free_head = node;
+#endif
+            throw;
+        }
         return std::launder(ptr);
     }
 
@@ -185,10 +220,16 @@ public:
 #endif
     }
 
+    MemoryPool(const MemoryPool &) = delete;
+    MemoryPool &operator=(const MemoryPool &) = delete;
+
     ~MemoryPool() noexcept
     {
 #ifdef InfoLog
         std::cout << "[Pool][DESTROY] max allocated=" << m_max_allocated << "\n";
+#endif
+#ifndef NDEBUG
+        assert(Used() == 0 && "MemoryPool destroyed with live objects");
 #endif
         ::operator delete(m_pool, std::align_val_t{SlotAlign});
     }
@@ -196,12 +237,42 @@ public:
     template <typename... Args>
     [[nodiscard]] MemoryPoolObject<T> Make(Args &&...args)
     {
-#ifdef InfoLog
-        std::cout << "[Pool][MAKE] create RAII object\n";
+        T *ptr = Create(std::forward<Args>(args)...);
+#ifdef ThreadSafe
+        std::lock_guard<std::mutex> guard(m);
+        m_used++;
+#else
+        m_used++;
 #endif
-        return MemoryPoolObject<T>(*this, Create(std::forward<Args>(args)...));
+        return MemoryPoolObject<T>(*this, ptr);
     }
 
     size_t Capacity() const noexcept { return m_count; }
-    size_t MaxAllocated() const noexcept { return m_max_allocated; }
+    size_t MaxAllocated() const noexcept
+    {
+#ifdef ThreadSafe
+        std::lock_guard<std::mutex> guard(m);
+        return m_max_allocated;
+#else
+        return m_max_allocated;
+#endif
+    }
+    size_t Used() const noexcept
+    {
+#ifdef ThreadSafe
+        std::lock_guard<std::mutex> guard(m);
+        return m_used;
+#else
+        return m_used;
+#endif
+    }
+    size_t Available() const noexcept
+    {
+#ifdef ThreadSafe
+        std::lock_guard<std::mutex> guard(m);
+        return m_count - m_used;
+#else
+        return m_count - m_used;
+#endif
+    }
 };
