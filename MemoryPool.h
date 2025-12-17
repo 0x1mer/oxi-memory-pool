@@ -1,5 +1,5 @@
-#pragma once
-
+#pragma once 
+ 
 //=====================================================//
 //                                                     //
 //   ██████╗ ██╗  ██╗ ██╗███╗   ███╗███████╗██████╗    //
@@ -12,8 +12,31 @@
 //                    0x1mer                           //
 //=====================================================//
 
+/**
+ * @file memory_pool.h
+ * @brief Lightweight fixed-size object memory pool and RAII wrapper.
+ *
+ * This header provides a simple memory pool implementation suitable for
+ * allocating many small objects of the same type T with minimal runtime
+ * overhead. It also contains a small RAII wrapper (MemoryPoolObject) which
+ * returns objects to the pool automatically when it goes out of scope.
+ *
+ * Features:
+ * - Optional informational logging via OxiMemPool_InfoLog macro.
+ * - Optional basic thread-safety via OxiMemPool_ThreadSafe macro (single
+ *   mutex protecting pool operations).
+ * - Optional user-defined error callback via OxiMemPool_ErrCallback macro.
+ * - Proper alignment for stored objects and storage reuse via an internal
+ *   singly-linked free list.
+ *
+ * @note The pool stores raw memory and constructs/destructs T in-place using
+ * placement new and explicit destructor calls. T must be Destructible.
+ *
+ * @author 0x1mer
+ * @license MIT
+ */
+
 // library source: https://github.com/0x1mer/oxi-memory-pool
-// MIT license
 
 // Logging support.
 //
@@ -49,75 +72,65 @@ using ErrorCallback = void (*)(const char *, size_t);
 #include <cassert>     // assert
 #include <utility>     // std::forward
 #include <type_traits> // std::destructible
-#include <stdexcept>   //
-#include <string>      // std::string
+#include <stdexcept>
+#include <string>
 
 // Forward declaration
-/**
- * @brief MemoryPool forward declaration
- *
- * The MemoryPool is a fixed-size pool of storage slots capable of
- * holding objects of type T. This forward declaration is constrained
- * with std::destructible to ensure T can be destroyed.
- *
- * @tparam T Type of object stored in the pool. Must be destructible.
- */
 template <typename T>
     requires std::destructible<T>
 class MemoryPool;
 
 /**
- * @brief RAII wrapper for an object allocated from MemoryPool.
+ * @brief RAII handle that holds an object allocated from MemoryPool<T>.
  *
- * MemoryPoolObject provides exclusive ownership of a single object
- * allocated from a MemoryPool<T>. When the MemoryPoolObject is destroyed
- * or Reset() is called, the encapsulated object is destroyed and its slot
- * is returned to the originating pool.
+ * MemoryPoolObject is a move-only type that owns a pointer to an object
+ * allocated from a MemoryPool. When the MemoryPoolObject is destroyed (or
+ * Reset() is called), the contained object is destroyed and the memory slot
+ * is returned to the pool.
  *
- * This class is moveable but not copyable.
+ * The class intentionally deletes copy operations to avoid double-freeing
+ * pool slots; move semantics are provided for efficient ownership transfer.
  *
- * @tparam T Type of object borrowed from the pool.
+ * @tparam T Type of the object stored in the pool. Must be destructible.
  */
 template <typename T>
     requires std::destructible<T>
 class MemoryPoolObject
 {
 private:
-    MemoryPool<T> *m_pool = nullptr; /**< Pointer to the originating pool. */
-    T *m_object = nullptr;           /**< Pointer to the managed object. */
+    MemoryPool<T> *m_pool = nullptr; /**< Pointer to originating pool. */
+    T *m_object = nullptr;           /**< Pointer to the object in-place. */
 
 private:
     friend class MemoryPool<T>;
 
     /**
-     * @brief Default construct an empty MemoryPoolObject.
-     *
-     * Creates a "null" wrapper that does not own any object. Used by the pool
-     * when constructing return values.
+     * @brief Default constructor creates an empty (null) handle.
      */
     MemoryPoolObject() noexcept = default;
 
     /**
-     * @brief Construct wrapper for an object from a pool.
+     * @brief Construct a handle bound to a pool and an object pointer.
      *
-     * This constructor is private and called by MemoryPool when returning
-     * a freshly created object.
-     *
-     * @param pool Reference to the MemoryPool that created the object.
-     * @param object Pointer to the object in pool storage.
+     * @param pool Reference to the MemoryPool that owns the storage.
+     * @param object Pointer to the constructed object inside the pool.
      */
     MemoryPoolObject(MemoryPool<T> &pool, T *object) noexcept
         : m_pool(&pool), m_object(object) {}
 
     /**
-     * @brief Destroy the managed object and return its slot to the pool.
+     * @brief Destroy the owned object and return its slot to the pool.
      *
-     * Safe to call on a null wrapper; after call the wrapper becomes empty.
+     * Called from the destructor and when resetting/moving to release the
+     * resource back to the pool. Safe to call when the handle is empty.
      */
     void Destroy()
     {
         if (m_pool && m_object)
         {
+#ifdef OxiMemPool_InfoLog
+            std::cout << "[PoolObject][DESTROY] object=" << m_object << "\n";
+#endif
             m_pool->Destroy(m_object);
             m_pool = nullptr;
             m_object = nullptr;
@@ -126,29 +139,28 @@ private:
 
 public:
     MemoryPoolObject(const MemoryPoolObject &) = delete;            /**< Non-copyable. */
-    MemoryPoolObject &operator=(const MemoryPoolObject &) = delete; /**< Non-copyable. */
+    MemoryPoolObject &operator=(const MemoryPoolObject &) = delete; /**< Non-copy-assignable. */
 
     /**
-     * @brief Move constructor.
+     * @brief Move constructor transfers ownership from other to this.
      *
-     * Transfers ownership from \p other to this wrapper. \p other becomes empty.
-     *
-     * @param other Source wrapper to move from.
+     * After the move, the source handle is left empty (no pool, no object).
      */
     MemoryPoolObject(MemoryPoolObject &&other) noexcept
         : m_pool(other.m_pool), m_object(other.m_object)
     {
+#ifdef OxiMemPool_InfoLog
+        std::cout << "[PoolObject][MOVE] from=" << other.m_object << "\n";
+#endif
         other.m_pool = nullptr;
         other.m_object = nullptr;
     }
 
     /**
-     * @brief Move assignment operator.
+     * @brief Move-assignment operator. Releases any currently owned object
+     * and takes ownership from other.
      *
-     * Releases any currently owned object, then takes ownership from \p other.
-     *
-     * @param other Source wrapper to move from.
-     * @return Reference to *this.
+     * Strong exception-safety is provided since Destroy() is noexcept.
      */
     MemoryPoolObject &operator=(MemoryPoolObject &&other) noexcept
     {
@@ -157,6 +169,9 @@ public:
             Destroy();
             m_pool = other.m_pool;
             m_object = other.m_object;
+#ifdef OxiMemPool_InfoLog
+            std::cout << "[PoolObject][MOVE_ASSIGN] object=" << m_object << "\n";
+#endif
             other.m_pool = nullptr;
             other.m_object = nullptr;
         }
@@ -164,10 +179,7 @@ public:
     }
 
     /**
-     * @brief Destructor.
-     *
-     * Ensures the managed object is destroyed and its slot returned to the pool.
-     * noexcept because Destroy() is noexcept and pool destruction handles invariants.
+     * @brief Destructor — destroys owned object (if any) and returns its slot.
      */
     ~MemoryPoolObject() noexcept
     {
@@ -175,99 +187,88 @@ public:
     }
 
     /**
-     * @brief Manually release/destroy the managed object and return the slot.
-     *
-     * After Reset(), the wrapper is empty and operator bool() will return false.
+     * @brief Reset the handle, destroying the contained object (if any).
      */
     void Reset() noexcept { Destroy(); }
 
     /**
-     * @brief Get raw pointer to the managed object.
-     *
-     * @return Pointer to T, or nullptr if wrapper is empty.
+     * @brief Access the underlying pointer to the object.
+     * @return Pointer to T, or nullptr if the handle is empty.
      */
     T *Get() const noexcept { return m_object; }
 
     /**
-     * @brief Dereference to the managed object.
-     *
-     * Undefined behaviour if called when wrapper is empty. Intended to mirror
-     * std::unique_ptr<T> semantics.
-     *
-     * @return Reference to the managed object.
+     * @brief Dereference operator to access the object.
+     * @return Reference to the contained T. Behavior undefined if empty.
      */
     T &operator*() const noexcept { return *m_object; }
 
     /**
-     * @brief Member access to the managed object.
-     *
-     * Undefined behaviour if called when wrapper is empty.
-     *
-     * @return Pointer to the managed object.
+     * @brief Pointer-like access to the object.
+     * @return Pointer to the contained T. Behavior undefined if empty.
      */
     T *operator->() const noexcept { return m_object; }
 
     /**
-     * @brief Allow boolean checks for validity.
-     *
-     * @return true if wrapper owns an object, false otherwise.
+     * @brief Boolean conversion indicating whether the handle owns an object.
+     * @return true if non-null, false otherwise.
      */
     explicit operator bool() const noexcept { return m_object != nullptr; }
 };
 
 /**
- * @brief Fixed-capacity MemoryPool for objects of type T.
+ * @brief Fixed-capacity memory pool for objects of type T.
  *
- * MemoryPool allocates a contiguous block of memory sized to hold a fixed number
- * of slots (specified at construction). Each slot can hold one T object.
+ * MemoryPool manages a preallocated block of memory capable of holding up to
+ * `count` objects of type T. Objects are constructed in-place using
+ * placement-new by calling Make(...). When a MemoryPoolObject returned by
+ * Make goes out of scope (or Reset is called), the object is destroyed and
+ * its slot is returned to the internal free list.
  *
- * Allocation strategy:
- *  - If a freed slot is available, it is taken from a singly-linked free list.
- *  - Otherwise, slots are handed out linearly from the preallocated block until
- *    capacity is exhausted.
+ * The implementation prioritizes simplicity and low overhead. It is not
+ * lock-free; optional locking via OxiMemPool_ThreadSafe uses a single
+ * std::mutex to protect concurrent access.
  *
- * Thread-safety model:
- *  - When OxiMemPool_ThreadSafe is defined, public operations (Make / Destroy)
- *    use a single std::mutex to protect free-list and accounting members.
- *  - Low-level helpers (Allocate_NoLock / Free_NoLock) are intentionally
- *    lock-free and must be called either while holding the mutex (thread-safe
- *    path) or from single-threaded context.
- *
- * Lifetime rules:
- *  - Construction and destruction of T are performed *outside* the pool mutex.
- *    The pool reserves/releases slots and adjusts counters under the mutex,
- *    but object constructors/destructors run without holding the mutex to
- *    avoid deadlocks and poor scalability.
- *
- * @tparam T Type of object stored in the pool. Must be Destructible.
+ * @tparam T Type stored in the pool; must be Destructible.
  */
 template <typename T>
     requires std::destructible<T>
 class MemoryPool
 {
 private:
+    /**
+     * @brief Internal node used for the free list.
+     *
+     * FreeNode overlays freed object storage and contains a pointer to the
+     * next free slot.
+     */
     struct FreeNode
     {
         FreeNode *next = nullptr;
     };
 
-    size_t m_count;              /**< Total number of slots in the pool (capacity). */
-    std::byte *m_pool = nullptr; /**< Pointer to the contiguous block of pool storage. */
+    size_t m_count;        /**< Total number of slots (capacity). */
+    std::byte *m_pool = nullptr; /**< Pointer to raw storage block. */
 
 #ifdef OxiMemPool_ErrCallback
-    ErrorCallback m_errCallback{};
+    ErrorCallback m_errCallback{}; /**< Optional user error callback. */
 #endif
 
 #ifdef OxiMemPool_ThreadSafe
-    mutable std::mutex m; /**< Mutex protecting free-list and accounting in ThreadSafe mode. */
+    mutable std::mutex m; /**< Mutex protecting mutable state when enabled. */
 #endif
 
-    // Protected by mutex in thread-safe mode (or only accessed from single-threaded code)
-    FreeNode *m_free_head = nullptr; /**< Head of the singly-linked free-list. */
-    size_t m_used = 0;               /**< Number of currently live objects. */
-    size_t m_max_allocated = 0;      /**< Number of slots handed out linearly so far. */
+    FreeNode *m_free_head = nullptr; /**< Head of the singly-linked free list. */
+    size_t m_used = 0;               /**< Number of currently constructed objects. */
+    size_t m_max_allocated = 0;      /**< Number of slots that have ever been allocated (high-water index). */
 
-    // Slot size/alignment calculations
+    /**
+     * @brief Size and alignment calculations for each slot.
+     *
+     * RawSlotSize — the storage size required to hold either T or FreeNode.
+     * SlotAlign — alignment chosen to satisfy both T and FreeNode.
+     * SlotSize — final aligned slot size used to index into the storage.
+     */
     static constexpr size_t RawSlotSize =
         sizeof(T) > sizeof(FreeNode) ? sizeof(T) : sizeof(FreeNode);
     static constexpr size_t SlotAlign =
@@ -278,16 +279,16 @@ private:
 private:
     friend class MemoryPoolObject<T>;
 
-    // ---------------------
-    // Low-level, no-lock helpers
-    // ---------------------
-    // These helpers do NOT take the mutex. They must be used either while the
-    // caller holds the mutex (thread-safe path) or from single-threaded code.
-
     /**
-     * @brief Allocate a raw slot without taking a lock.
+     * @brief Allocate a raw slot without taking the external lock.
      *
-     * Returns nullptr via ReportError if the pool is exhausted.
+     * This returns a pointer to memory suitable for placement-new'ing a T.
+     * It prefers reusing a slot from the free list; if none are available it
+     * returns the next unused region from the raw storage. If the pool is
+     * exhausted (max_allocated >= m_count) it reports an error and returns
+     * nullptr.
+     *
+     * @return Pointer to raw memory for T, or nullptr on exhaustion.
      */
     T *Allocate_NoLock()
     {
@@ -295,59 +296,79 @@ private:
         {
             FreeNode *node = m_free_head;
             m_free_head = node->next;
+#ifdef OxiMemPool_InfoLog
+            std::cout << "[Pool][ALLOC][REUSE] slot=" << node << "\n";
+#endif
             return reinterpret_cast<T *>(node);
         }
 
         if (m_max_allocated >= m_count)
         {
+#ifdef OxiMemPool_InfoLog
+            std::cout << "[Pool][ALLOC][FAILED] exhausted\n";
+#endif
             ReportError("MemoryPool exhausted", 1);
             return nullptr;
         }
 
-        return reinterpret_cast<T *>(m_pool + SlotSize * m_max_allocated++);
+        auto *ptr = reinterpret_cast<T *>(m_pool + SlotSize * m_max_allocated++);
+#ifdef OxiMemPool_InfoLog
+        std::cout << "[Pool][ALLOC][NEW] slot=" << ptr
+                  << " index=" << (m_max_allocated - 1) << "\n";
+#endif
+        return ptr;
     }
 
     /**
-     * @brief Return a slot to the free list without taking a lock.
+     * @brief Return a slot into the free list without taking the external lock.
+     *
+     * The pointer must point to storage previously returned by Allocate_NoLock
+     * and must not be used after calling this function (until re-allocated).
      */
     void Free_NoLock(T *obj) noexcept
     {
         auto *node = reinterpret_cast<FreeNode *>(obj);
         node->next = m_free_head;
         m_free_head = node;
+#ifdef OxiMemPool_InfoLog
+        std::cout << "[Pool][FREE] slot=" << obj << "\n";
+#endif
     }
 
 public:
     /**
-     * @brief Create a new object in the pool and return an owning RAII wrapper.
+     * @brief Create and construct an object of type T inside the pool.
      *
-     * Thread-safe behaviour (when OxiMemPool_ThreadSafe defined):
-     *  - Reserve a slot and increment m_used under the mutex.
-     *  - Construct the object outside the mutex.
-     *  - If construction throws, rollback the reservation under the mutex.
+     * This function constructs a T in-place using perfect forwarding of the
+     * provided arguments. It returns a MemoryPoolObject<T> that will destroy
+     * the object and return the slot to the pool when the handle is destroyed.
      *
-     * Single-threaded behaviour:
-     *  - Allocate, construct, adjust counters without locking.
+     * On allocation failure (pool exhausted) a default-empty MemoryPoolObject
+     * is returned. If construction of T throws, the slot is returned and the
+     * exception is propagated.
      *
-     * @tparam Args Parameter pack for T constructor.
-     * @param args Arguments forwarded to T constructor.
-     * @return MemoryPoolObject<T> RAII wrapper owning the new object,
-     *         or an empty wrapper if allocation failed.
+     * Thread-safety: if OxiMemPool_ThreadSafe is defined this function will
+     * lock the internal mutex while allocating and updating counters.
+     *
+     * @tparam Args Parameter pack forwarded to T's constructor.
+     * @param args Constructor arguments for T.
+     * @return MemoryPoolObject<T> owning the constructed object or empty on
+     *         failure.
      */
     template <typename... Args>
     [[nodiscard]] MemoryPoolObject<T> Make(Args &&...args)
     {
 #ifdef OxiMemPool_ThreadSafe
         T *slot = nullptr;
-
         {
             std::lock_guard<std::mutex> guard(m);
             slot = Allocate_NoLock();
-            if (!slot) [[unlikely]]
-            {
+            if (!slot)
                 return MemoryPoolObject<T>();
-            }
             ++m_used;
+#ifdef OxiMemPool_InfoLog
+            std::cout << "[Pool][USED] ++ -> " << m_used << "\n";
+#endif
         }
 
         try
@@ -356,7 +377,6 @@ public:
         }
         catch (...)
         {
-            // Rollback reservation if construction failed.
             std::lock_guard<std::mutex> guard(m);
             --m_used;
             Free_NoLock(slot);
@@ -365,12 +385,9 @@ public:
 
         return MemoryPoolObject<T>(*this, std::launder(slot));
 #else
-        // Single-threaded path: simple allocate -> construct -> accounting.
         T *slot = Allocate_NoLock();
-        if (!slot) [[unlikely]]
-        {
+        if (!slot)
             return MemoryPoolObject<T>();
-        }
 
         try
         {
@@ -383,100 +400,134 @@ public:
         }
 
         ++m_used;
+#ifdef OxiMemPool_InfoLog
+        std::cout << "[Pool][USED] ++ -> " << m_used << "\n";
+#endif
         return MemoryPoolObject<T>(*this, std::launder(slot));
 #endif
     }
 
 private:
     /**
-     * @brief Destroy object located at \p obj and push its slot to free-list.
+     * @brief Destroy an object located in the pool and return its slot.
      *
-     * Destructor for T is invoked outside of the pool mutex. Only after the
-     * destructor returns do we take the mutex to push the slot back into the
-     * free-list and decrement m_used (in thread-safe mode).
+     * This function calls the object's destructor and places the slot back on
+     * the free list. It is noexcept so it is safe to call from destructors
+     * and cleanup paths.
      *
-     * This method is noexcept and intended to be called from
-     * MemoryPoolObject::Destroy().
+     * @param obj Pointer to the object previously created inside the pool.
      */
     void Destroy(T *obj) noexcept
     {
+#ifdef OxiMemPool_InfoLog
+        std::cout << "[Pool][OBJ_DTOR] object=" << obj << "\n";
+#endif
         obj->~T();
 
 #ifdef OxiMemPool_ThreadSafe
         std::lock_guard<std::mutex> guard(m);
+#endif
         Free_NoLock(obj);
         --m_used;
-#else
-        Free_NoLock(obj);
-        --m_used;
+#ifdef OxiMemPool_InfoLog
+        std::cout << "[Pool][USED] -- -> " << m_used << "\n";
 #endif
     }
 
-    // ---------------------
-    // Misc helpers
-    // ---------------------
+    /**
+     * @brief Internal error reporting helper.
+     *
+     * If OxiMemPool_ErrCallback is defined and an ErrorCallback was provided
+     * during construction it will be invoked. Otherwise this function throws
+     * std::runtime_error with a formatted message.
+     *
+     * @param errorMessage Human-readable description of the error.
+     * @param errorCode Numeric error code (user-defined semantics).
+     */
     void ReportError(const char *errorMessage, size_t errorCode)
     {
+#ifdef OxiMemPool_InfoLog
+        std::cout << "[Pool][ERROR] " << errorMessage
+                  << " code=" << errorCode << "\n";
+#endif
 #ifdef OxiMemPool_ErrCallback
         if (m_errCallback)
         {
             m_errCallback(errorMessage, errorCode);
             return;
         }
-        else
-        {
-            throw std::runtime_error(
-                std::string(errorMessage) +
-                "\nError code: " +
-                std::to_string(errorCode));
-        }
 #endif
-
         throw std::runtime_error(
             std::string(errorMessage) +
             "\nError code: " +
             std::to_string(errorCode));
     }
 
+    /**
+     * @brief Allocate and initialize the raw storage block used by the pool.
+     *
+     * Uses ::operator new with alignment to allocate SlotSize * m_count bytes.
+     * This method is called from constructors and assumes m_count has been set.
+     */
     void Init()
     {
         m_pool = static_cast<std::byte *>(
             ::operator new(SlotSize * m_count,
                            std::align_val_t{SlotAlign}));
+#ifdef OxiMemPool_InfoLog
+        std::cout << "[Pool][INIT] capacity=" << m_count
+                  << " slot_size=" << SlotSize
+                  << " align=" << SlotAlign << "\n";
+#endif
     }
 
 public:
+    /**
+     * @brief Construct a MemoryPool with the given capacity.
+     *
+     * @param count Maximum number of objects the pool can hold (must be > 0).
+     * @throws std::runtime_error or invokes error callback if count == 0.
+     */
     explicit MemoryPool(size_t count)
         : m_count(count)
     {
         if (count == 0)
-        {
             ReportError("Size of pool cannot be 0", 0);
-        }
         Init();
     }
 
 #ifdef OxiMemPool_ErrCallback
-    explicit MemoryPool(
-        size_t count,
-        ErrorCallback errCallback)
+    /**
+     * @brief Construct a MemoryPool and register an error callback.
+     *
+     * @param count Capacity of the pool.
+     * @param errCallback User-provided callback invoked on errors.
+     */
+    explicit MemoryPool(size_t count, ErrorCallback errCallback)
         : m_count(count), m_errCallback(errCallback)
     {
         if (count == 0)
-        {
             ReportError("Size of pool cannot be 0", 0);
-        }
         Init();
     }
 #endif
 
-    MemoryPool(const MemoryPool &) = delete;
-    MemoryPool &operator=(const MemoryPool &) = delete;
+    MemoryPool(const MemoryPool &) = delete;            /**< Non-copyable. */
+    MemoryPool &operator=(const MemoryPool &) = delete; /**< Non-copy-assignable. */
 
+    /**
+     * @brief Destructor — frees the raw storage and asserts there are no live objects
+     * in debug builds.
+     *
+     * The destructor will call ::operator delete with alignment. In debug builds
+     * an assertion checks that Used() == 0 to help catch leaks where objects
+     * were not returned to the pool.
+     */
     ~MemoryPool() noexcept
     {
 #ifdef OxiMemPool_InfoLog
-        std::cout << "[Pool][DESTROY] max allocated=" << m_max_allocated << "\n";
+        std::cout << "[Pool][DESTROY] used=" << m_used
+                  << " max_allocated=" << m_max_allocated << "\n";
 #endif
 #ifndef NDEBUG
         assert(Used() == 0 && "MemoryPool destroyed with live objects");
@@ -484,35 +535,55 @@ public:
         ::operator delete(m_pool, std::align_val_t{SlotAlign});
     }
 
+    /**
+     * @brief Get the configured capacity of the pool.
+     * @return Number of slots configured for this pool.
+     */
     size_t Capacity() const noexcept { return m_count; }
 
+    /**
+     * @brief Get the number of slots that have ever been allocated from raw
+     * storage (high-water index).
+     *
+     * When thread-safety is enabled, this getter takes the internal mutex to
+     * provide a stable value.
+     *
+     * @return The maximum index + 1 that has been allocated so far.
+     */
     size_t MaxAllocated() const noexcept
     {
 #ifdef OxiMemPool_ThreadSafe
         std::lock_guard<std::mutex> guard(m);
-        return m_max_allocated;
-#else
-        return m_max_allocated;
 #endif
+        return m_max_allocated;
     }
 
+    /**
+     * @brief Number of currently constructed/checked-out objects.
+     * @return Count of objects that must be returned before pool destruction
+     *         (or Available() increases accordingly).
+     */
     size_t Used() const noexcept
     {
 #ifdef OxiMemPool_ThreadSafe
         std::lock_guard<std::mutex> guard(m);
-        return m_used;
-#else
-        return m_used;
 #endif
+        return m_used;
     }
 
+    /**
+     * @brief Number of available slots (capacity - used).
+     *
+     * Note: this value may change immediately after returning from this call
+     * in multi-threaded environments.
+     *
+     * @return Number of slots that are not currently in use.
+     */
     size_t Available() const noexcept
     {
-#ifdef OxiMemPool_ThreadSafe
-        std::lock_guard<std::mutex> guard(m);
-        return m_count - m_used;
-#else
-        return m_count - m_used;
-#endif
-    }
-};
+#ifdef OxiMemPool_ThreadSafe 
+        std::lock_guard<std::mutex> guard(m); 
+#endif 
+        return m_count - m_used; 
+    } 
+}; 
