@@ -1,0 +1,19 @@
+Start testing: Dec 25 09:04 EET
+----------------------------------------------------------
+8/8 Testing: Pool.ThreadStress
+8/8 Test: Pool.ThreadStress
+Command: "/home/oximer/VSCodeProjects/OxiMemoryPool/out/build/Configure preset using toolchain file/thread_stress_tests"
+Directory: /home/oximer/VSCodeProjects/OxiMemoryPool/out/build/Configure preset using toolchain file
+"Pool.ThreadStress" start time: Dec 25 09:04 EET
+Output:
+----------------------------------------------------------
+[ThreadStress] OK: threads=16 constructed=25279988 destroyed=25279988
+<end of output>
+Test time =   3.00 sec
+----------------------------------------------------------
+Test Passed.
+"Pool.ThreadStress" end time: Dec 25 09:04 EET
+"Pool.ThreadStress" time elapsed: 00:00:03
+----------------------------------------------------------
+
+End testing: Dec 25 09:04 EET

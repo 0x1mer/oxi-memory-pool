@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Site BuildName="Linux-c++"
+	BuildStamp="20251225-0422-Experimental"
+	Name="oximer"
+	Generator="ctest-4.2.1"
+	CompilerName="/usr/bin/c++"
+	CompilerVersion="15.2.1"
+	OSName="Linux"
+	Hostname="oximer"
+	OSRelease="6.18.2-arch2-1"
+	OSVersion="#1 SMP PREEMPT_DYNAMIC Thu, 18 Dec 2025 18:00:18 +0000"
+	OSPlatform="x86_64"
+	Is64Bits="1"
+	VendorString="GenuineIntel"
+	VendorID="Intel Corporation"
+	FamilyID="6"
+	ModelID="154"
+	ModelName="12th Gen Intel(R) Core(TM) i7-12650H"
+	ProcessorCacheSize="24576"
+	NumberOfLogicalCPU="16"
+	NumberOfPhysicalCPU="10"
+	TotalVirtualMemory="15999"
+	TotalPhysicalMemory="15672"
+	LogicalProcessorsPerPhysical="1"
+	ProcessorClockFrequency="4000"
+	>
+	<Testing>
+		<StartDateTime>Dec 25 09:04 EET</StartDateTime>
+		<StartTestTime>1766646263</StartTestTime>
+		<TestList>
+			<Test>./Pool.ThreadStress</Test>
+		</TestList>
+		<Test Status="passed">
+			<Name>Pool.ThreadStress</Name>
+			<Path>.</Path>
+			<FullName>./Pool.ThreadStress</FullName>
+			<FullCommandLine>/home/oximer/VSCodeProjects/OxiMemoryPool/out/build/Configure\ preset\ using\ toolchain\ file/thread_stress_tests</FullCommandLine>
+			<Results>
+				<NamedMeasurement type="numeric/double" name="Execution Time">
+					<Value>3.0027</Value>
+				</NamedMeasurement>
+				<NamedMeasurement type="numeric/double" name="Processors">
+					<Value>1</Value>
+				</NamedMeasurement>
+				<NamedMeasurement type="text/string" name="Completion Status">
+					<Value>Completed</Value>
+				</NamedMeasurement>
+				<NamedMeasurement type="text/string" name="Command Line">
+					<Value>/home/oximer/VSCodeProjects/OxiMemoryPool/out/build/Configure\ preset\ using\ toolchain\ file/thread_stress_tests</Value>
+				</NamedMeasurement>
+				<NamedMeasurement type="text/string" name="Environment">
+					<Value>#CTEST_RESOURCE_GROUP_COUNT=</Value>
+				</NamedMeasurement>
+				<Measurement>
+					<Value>[ThreadStress] OK: threads=16 constructed=25279988 destroyed=25279988
+</Value>
+				</Measurement>
+			</Results>
+		</Test>
+		<EndDateTime>Dec 25 09:04 EET</EndDateTime>
+		<EndTestTime>1766646266</EndTestTime>
+		<ElapsedMinutes>0</ElapsedMinutes>
+	</Testing>
+</Site>
